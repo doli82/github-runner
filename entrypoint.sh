@@ -5,8 +5,16 @@ set -euo pipefail
 if [ -S /var/run/docker.sock ]; then
     DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 0)
     if [ "$DOCKER_GID" != "0" ]; then
-        groupadd -g "$DOCKER_GID" docker 2>/dev/null || true
-        usermod -a -G docker runner
+        SOCKET_GROUP_NAME=$(getent group "$DOCKER_GID" | cut -d: -f1 || true)
+        if [ -z "$SOCKET_GROUP_NAME" ]; then
+            if getent group docker >/dev/null 2>&1; then
+                SOCKET_GROUP_NAME=docker-host
+            else
+                SOCKET_GROUP_NAME=docker
+            fi
+            groupadd -g "$DOCKER_GID" "$SOCKET_GROUP_NAME"
+        fi
+        usermod -a -G "$SOCKET_GROUP_NAME" runner
     fi
 fi
 
@@ -75,10 +83,20 @@ configure_runner() {
   
   # First, try to remove any existing runner with the same name
   echo "Attempting to remove existing runner session"
-  remove_runner
+  if remove_runner; then
+    echo "Successfully removed existing runner"
+    sleep 5  # Wait for GitHub to process the removal
+  else
+    echo "Failed to remove existing runner, proceeding anyway"
+  fi
   
   local token
   token=$(request_token "$REGISTRATION_API")
+  if [ -z "$token" ]; then
+    echo "Failed to get registration token"
+    return 1
+  fi
+  
   gosu runner ./config.sh --unattended \
     --url "$RUNNER_URL" \
     --token "$token" \

@@ -21,6 +21,7 @@ RUN apt-get update \
         unzip \
         bash \
         gosu \
+        docker.io \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -s /bin/bash runner
 

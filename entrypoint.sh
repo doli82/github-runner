@@ -72,6 +72,11 @@ request_token() {
 
 configure_runner() {
   echo "Configuring GitHub Actions Runner for $RUNNER_URL"
+  
+  # First, try to remove any existing runner with the same name
+  echo "Attempting to remove existing runner session"
+  remove_runner
+  
   local token
   token=$(request_token "$REGISTRATION_API")
   gosu runner ./config.sh --unattended \

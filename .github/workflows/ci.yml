@@ -1,0 +1,60 @@
+name: CI
+
+# Roda a cada push em um PR (evento synchronize) e na abertura/reabertura.
+on:
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (Dockerfile + shell)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+      - name: Lint entrypoint (shellcheck)
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: .
+          additional_files: entrypoint.sh
+
+  build:
+    name: Build de validação (sem push)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (load local, sem publicar)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: github-runner:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test (entrypoint exige variáveis)
+        run: |
+          set -e
+          # Sem RUNNER_URL deve falhar com erro claro e exit != 0.
+          if docker run --rm github-runner:ci-${{ github.sha }} 2>err.log; then
+            echo "ERRO: container subiu sem RUNNER_URL"; exit 1
+          fi
+          grep -q "RUNNER_URL" err.log && echo "OK: validação de entrada funciona"

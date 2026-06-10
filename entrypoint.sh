@@ -90,6 +90,20 @@ remove_runner() {
   gosu runner ./config.sh remove --token "$token" || true
 }
 
+# Espera o job em andamento terminar. Runner.Worker é o processo do job:
+# enquanto ele existir, há um job rodando e NÃO podemos sinalizar o listener
+# (TERM no Runner.Listener cancela o job no meio — era isso que matava os
+# deploys). Mesma estratégia do actions-runner-controller oficial.
+wait_for_job() {
+  if pgrep -f Runner.Worker >/dev/null 2>&1; then
+    echo ">> Job em andamento: aguardando finalizar antes de parar o runner..."
+    while pgrep -f Runner.Worker >/dev/null 2>&1; do
+      sleep 5
+    done
+    echo ">> Job finalizado."
+  fi
+}
+
 # NOTA: o shutdown abaixo espera o job atual terminar após o SIGTERM.
 # Garanta na orquestração um timeout generoso ou o Docker mata em 10s:
 #   docker run --stop-timeout 3600   /   compose: stop_grace_period: 1h
@@ -97,9 +111,12 @@ _stopped=0
 graceful_stop() {
   [ "$_stopped" = "1" ] && return
   _stopped=1
-  echo ">> Sinal de parada recebido: finalizando job atual e desregistrando..."
+  echo ">> Sinal de parada recebido."
+  wait_for_job
+  # Sem job rodando: ephemeral já saiu sozinho após o job; persistente está
+  # ocioso e pode receber TERM sem derrubar nada.
   if [ -n "${RUNNER_PID:-}" ] && kill -0 "$RUNNER_PID" 2>/dev/null; then
-    kill -TERM "$RUNNER_PID" 2>/dev/null || true   # run.sh termina o job atual e sai
+    kill -TERM "$RUNNER_PID" 2>/dev/null || true
     wait "$RUNNER_PID" 2>/dev/null || true
   fi
   # Ephemeral se desregistra sozinho no GitHub após o job; tentar remover um

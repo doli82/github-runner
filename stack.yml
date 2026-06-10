@@ -1,0 +1,65 @@
+version: "3.8"
+
+# Stack do GitHub Actions Runner (efêmero) para Docker Swarm.
+# Deploy:
+#   echo "$GITHUB_PAT" | docker secret create github_pat -
+#   docker stack deploy -c stack.yml --with-registry-auth runners
+#
+# Troque OWNER pelo dono do pacote no ghcr.io (minúsculo).
+
+services:
+  github-runner:
+    image: ghcr.io/OWNER/github-runner:latest
+
+    # Shutdown gracioso: o entrypoint para o job atual e desregistra antes
+    # do SIGKILL. Sem isto o Swarm mata em 10s e deixa sessão fantasma.
+    stop_grace_period: 1h
+
+    environment:
+      # --- Identidade do runner ---
+      - RUNNER_URL=https://github.com/OWNER            # repo ou org
+      - RUNNER_LABELS=self-hosted,Linux,docker
+      - RUNNER_GROUP=Default
+      # Efêmero: 1 job por registro, container reinicia limpo a cada job.
+      # Elimina o conflito "A session for this runner already exists".
+      - RUNNER_EPHEMERAL=true
+      # SEM RUNNER_NAME fixo: cai no default $(hostname), único por container.
+      # PAT vem de secret (lido via *_FILE abaixo).
+      - GITHUB_PAT_FILE=/run/secrets/github_pat
+
+    secrets:
+      - github_pat
+
+    volumes:
+      # Docker-out-of-Docker: usa o daemon do host (cache de layers fica no host).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Work dir efêmero por tarefa (não compartilhar entre réplicas).
+      - type: volume
+        source: runner-work
+        target: /_work
+
+    deploy:
+      # Cada réplica = 1 job concorrente. Ajuste à capacidade do nó.
+      replicas: 2
+      restart_policy:
+        condition: any        # efêmero sai após o job -> reinicia e re-registra
+        delay: 5s
+        window: 30s
+      update_config:
+        order: start-first    # não derruba runner em job durante redeploy
+        parallelism: 1
+        delay: 10s
+      rollback_config:
+        order: start-first
+      resources:
+        limits:
+          memory: 4G          # teto: evita OOM derrubar o nó (ajuste ao build)
+        reservations:
+          memory: 512M
+
+volumes:
+  runner-work:
+
+secrets:
+  github_pat:
+    external: true            # criado com: docker secret create github_pat -

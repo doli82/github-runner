@@ -22,6 +22,11 @@ if [ -d /_work ] && [ "$(stat -c '%U' /_work 2>/dev/null)" != "runner" ]; then
 fi
 
 # --- Entradas ---
+# Suporte a *_FILE (Docker/Swarm secrets): se definido, lê o valor do arquivo.
+if [ -n "${GITHUB_PAT_FILE:-}" ] && [ -r "${GITHUB_PAT_FILE}" ]; then
+  GITHUB_PAT="$(cat "${GITHUB_PAT_FILE}")"
+fi
+
 RUNNER_URL="${RUNNER_URL:-${REPO_URL:-}}"
 GITHUB_PAT="${GITHUB_PAT:-${PAT_TOKEN:-}}"
 RUNNER_NAME="${RUNNER_NAME:-$(hostname)}"
@@ -94,10 +99,12 @@ graceful_stop() {
   _stopped=1
   echo ">> Sinal de parada recebido: finalizando job atual e desregistrando..."
   if [ -n "${RUNNER_PID:-}" ] && kill -0 "$RUNNER_PID" 2>/dev/null; then
-    kill -TERM "$RUNNER_PID" 2>/dev/null || true   # run.sh para após o job atual
+    kill -TERM "$RUNNER_PID" 2>/dev/null || true   # run.sh termina o job atual e sai
     wait "$RUNNER_PID" 2>/dev/null || true
   fi
-  remove_runner
+  # Ephemeral se desregistra sozinho no GitHub após o job; tentar remover um
+  # runner ocupado só gera "cannot be deleted". Só removemos os persistentes.
+  [ "$RUNNER_EPHEMERAL" = "true" ] || remove_runner
   exit 0
 }
 trap graceful_stop TERM INT
@@ -118,5 +125,6 @@ code=$?
 
 # Saída inesperada (não foi sinal): desregistra para não deixar runner fantasma.
 # A orquestração reinicia o container (restart policy), que reconfigura.
-remove_runner
+# Ephemeral já se removeu no GitHub após o job; não tentar de novo.
+[ "$RUNNER_EPHEMERAL" = "true" ] || remove_runner
 exit "$code"

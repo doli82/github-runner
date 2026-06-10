@@ -35,6 +35,7 @@ WORKDIR ${RUNNER_ROOT}
 # Baixa + extrai o runner e instala as deps de SO pelo script oficial
 # (mantém libicu/libssl/libkrb5 alinhados à versão do runner).
 RUN set -eux; \
+    apt-get update; \
     arch="$([ "${TARGETARCH}" = "arm64" ] && echo arm64 || echo x64)"; \
     version="${RUNNER_VERSION}"; \
     if [ -z "$version" ]; then \
@@ -49,7 +50,8 @@ RUN set -eux; \
     chown -R runner:runner "${RUNNER_ROOT}"
 
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Normaliza CRLF->LF (caso o checkout traga line endings do Windows) e torna executável.
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 # Detecta runner morto para a orquestração reiniciar o container.
 # start-period folgado para cobrir config com retry de rede.

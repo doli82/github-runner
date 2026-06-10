@@ -1,0 +1,4 @@
+# Scripts shell sempre com LF, mesmo em checkout no Windows.
+*.sh text eol=lf
+entrypoint.sh text eol=lf
+Dockerfile text eol=lf

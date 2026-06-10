@@ -1,189 +1,122 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Configure Docker socket permissions if present
-if [ -S /var/run/docker.sock ]; then
-    DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 0)
-    if [ "$DOCKER_GID" != "0" ]; then
-        SOCKET_GROUP_NAME=$(getent group "$DOCKER_GID" | cut -d: -f1 || true)
-        if [ -z "$SOCKET_GROUP_NAME" ]; then
-            if getent group docker >/dev/null 2>&1; then
-                SOCKET_GROUP_NAME=docker-host
-            else
-                SOCKET_GROUP_NAME=docker
-            fi
-            groupadd -g "$DOCKER_GID" "$SOCKET_GROUP_NAME"
-        fi
-        usermod -a -G "$SOCKET_GROUP_NAME" runner
-    fi
-fi
-
-# Ensure work directory is accessible by runner
-if [ -d /_work ]; then
-    chown -R runner:runner /_work
-fi
-
 cd /actions-runner
 
-RUNNER_URL=${RUNNER_URL:-${REPO_URL:-}}
-GITHUB_PAT=${GITHUB_PAT:-${PAT_TOKEN:-}}
-RUNNER_NAME=${RUNNER_NAME:-$(hostname)}
-RUNNER_WORKDIR=${RUNNER_WORKDIR:-/_work}
-RUNNER_LABELS=${RUNNER_LABELS:-self-hosted,Linux}
-RUNNER_GROUP=${RUNNER_GROUP:-Default}
-
-if [ -z "$RUNNER_URL" ]; then
-  echo "ERROR: RUNNER_URL or REPO_URL must be set"
-  exit 1
+# --- Permissão do socket do Docker (Docker-out-of-Docker) ---
+if [ -S /var/run/docker.sock ]; then
+  DOCKER_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 0)"
+  if [ "$DOCKER_GID" != "0" ]; then
+    group_name="$(getent group "$DOCKER_GID" | cut -d: -f1 || true)"
+    if [ -z "$group_name" ]; then
+      group_name=docker-host
+      groupadd -g "$DOCKER_GID" "$group_name"
+    fi
+    usermod -aG "$group_name" runner
+  fi
 fi
 
-if [ -z "$GITHUB_PAT" ]; then
-  echo "ERROR: GITHUB_PAT or PAT_TOKEN must be set"
-  exit 1
+# --- Dono do work dir: só ajusta o ponto de montagem, não recursivo no cache ---
+if [ -d /_work ] && [ "$(stat -c '%U' /_work 2>/dev/null)" != "runner" ]; then
+  chown runner:runner /_work
 fi
+
+# --- Entradas ---
+RUNNER_URL="${RUNNER_URL:-${REPO_URL:-}}"
+GITHUB_PAT="${GITHUB_PAT:-${PAT_TOKEN:-}}"
+RUNNER_NAME="${RUNNER_NAME:-$(hostname)}"
+RUNNER_WORKDIR="${RUNNER_WORKDIR:-/_work}"
+RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,Linux}"
+RUNNER_GROUP="${RUNNER_GROUP:-Default}"
+RUNNER_EPHEMERAL="${RUNNER_EPHEMERAL:-false}"
+GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
+
+[ -n "$RUNNER_URL" ]  || { echo "ERROR: RUNNER_URL/REPO_URL obrigatório"; exit 1; }
+[ -n "$GITHUB_PAT" ]  || { echo "ERROR: GITHUB_PAT/PAT_TOKEN obrigatório"; exit 1; }
 
 parse_urls() {
-  local url="$RUNNER_URL"
-  local host
-  host=$(echo "$url" | awk -F/ '{print $3}')
-
-  if [[ "$host" != "github.com" ]]; then
-    echo "ERROR: only github.com URLs are supported by this image right now"
-    exit 1
-  fi
-
-  local path
-  path=$(echo "$url" | sed -E 's#https://github.com/##; s#/$##')
-
+  local host path
+  host="$(awk -F/ '{print $3}' <<<"$RUNNER_URL")"
+  [ "$host" = "github.com" ] || { echo "ERROR: só URLs github.com são suportadas"; exit 1; }
+  path="$(sed -E 's#https://github.com/##; s#/$##' <<<"$RUNNER_URL")"
   if [[ "$path" =~ ^([^/]+)/([^/]+)$ ]]; then
     API_PATH="repos/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
   elif [[ "$path" =~ ^([^/]+)$ ]]; then
     API_PATH="orgs/${BASH_REMATCH[1]}"
   else
-    echo "ERROR: RUNNER_URL must be a repository or organization URL"
-    exit 1
+    echo "ERROR: RUNNER_URL deve ser URL de repo ou org"; exit 1
   fi
-
   REGISTRATION_API="${GITHUB_API_URL}/${API_PATH}/actions/runners/registration-token"
   REMOVE_API="${GITHUB_API_URL}/${API_PATH}/actions/runners/remove-token"
 }
 
 request_token() {
-  local api_url="$1"
-  local response
-  response=$(curl -fsSL -X POST \
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 -X POST \
     -H "Accept: application/vnd.github+json" \
     -H "Authorization: token ${GITHUB_PAT}" \
-    "$api_url")
-  echo "$response" | jq -r .token
+    "$1" | jq -r '.token'
 }
 
 configure_runner() {
-  echo "Configuring GitHub Actions Runner for $RUNNER_URL"
-  
-  # First, try to remove any existing runner with the same name
-  echo "Attempting to remove existing runner session"
-  if remove_runner; then
-    echo "Successfully removed existing runner"
-    sleep 5  # Wait for GitHub to process the removal
-  else
-    echo "Failed to remove existing runner, proceeding anyway"
-  fi
-  
   local token
-  token=$(request_token "$REGISTRATION_API")
-  if [ -z "$token" ]; then
-    echo "Failed to get registration token"
-    return 1
-  fi
-  
+  token="$(request_token "$REGISTRATION_API")"
+  [ -n "$token" ] && [ "$token" != "null" ] || { echo "ERROR: registration token vazio"; return 1; }
+
+  local extra=()
+  [ "$RUNNER_EPHEMERAL" = "true" ] && extra+=(--ephemeral)
+
   gosu runner ./config.sh --unattended \
     --url "$RUNNER_URL" \
     --token "$token" \
     --name "$RUNNER_NAME" \
     --work "$RUNNER_WORKDIR" \
     --labels "$RUNNER_LABELS" \
+    --runnergroup "$RUNNER_GROUP" \
     --replace \
-    --disableupdate
+    --disableupdate \
+    "${extra[@]}"
 }
 
 remove_runner() {
-  if [ ! -f .runner ]; then
-    return
-  fi
-
-  echo "Removing GitHub Actions Runner registration"
+  [ -f .runner ] || return 0
   local token
-  token=$(request_token "$REMOVE_API") || return
-  gosu runner ./config.sh remove --unattended --token "$token" || true
+  token="$(request_token "$REMOVE_API")" || return 0
+  [ -n "$token" ] && [ "$token" != "null" ] || return 0
+  gosu runner ./config.sh remove --token "$token" || true
 }
 
-cleanup() {
-  echo "Shutting down runner"
-  if [ -n "${TOKEN_RENEWER_PID:-}" ]; then
-    kill "$TOKEN_RENEWER_PID" 2>/dev/null || true
+# NOTA: o shutdown abaixo espera o job atual terminar após o SIGTERM.
+# Garanta na orquestração um timeout generoso ou o Docker mata em 10s:
+#   docker run --stop-timeout 3600   /   compose: stop_grace_period: 1h
+_stopped=0
+graceful_stop() {
+  [ "$_stopped" = "1" ] && return
+  _stopped=1
+  echo ">> Sinal de parada recebido: finalizando job atual e desregistrando..."
+  if [ -n "${RUNNER_PID:-}" ] && kill -0 "$RUNNER_PID" 2>/dev/null; then
+    kill -TERM "$RUNNER_PID" 2>/dev/null || true   # run.sh para após o job atual
+    wait "$RUNNER_PID" 2>/dev/null || true
   fi
   remove_runner
   exit 0
 }
+trap graceful_stop TERM INT
 
-token_renewer() {
-  # Renewal loop - check every 24 hours
-  local RENEWAL_INTERVAL=86400  # 24 hours in seconds
-  
-  while true; do
-    sleep "$RENEWAL_INTERVAL"
-    
-    if [ ! -f .runner ]; then
-      echo "Runner not registered, skipping renewal"
-      continue
-    fi
-    
-    echo "Renewing runner token"
-    local new_token
-    new_token=$(request_token "$REGISTRATION_API")
-    
-    if [ -z "$new_token" ]; then
-      echo "Failed to get renewal token, will retry on next cycle"
-      continue
-    fi
-    
-    # Update the runner token by re-configuring
-    gosu runner ./config.sh --unattended \
-      --url "$RUNNER_URL" \
-      --token "$new_token" \
-      --name "$RUNNER_NAME" \
-      --work "$RUNNER_WORKDIR" \
-      --labels "$RUNNER_LABELS" \
-      --replace \
-      --disableupdate || echo "Token renewal failed, will retry on next cycle"
-  done
-}
-
-trap cleanup TERM INT EXIT
 parse_urls
 
-# Start token renewal in background
-token_renewer &
-TOKEN_RENEWER_PID=$!
+# Ephemeral sempre reconfigura (registro é descartado após cada job).
+if [ "$RUNNER_EPHEMERAL" = "true" ] || [ ! -f .runner ]; then
+  rm -f .runner .credentials .credentials_rsaparams 2>/dev/null || true
+  configure_runner
+fi
 
-while true; do
-  if [ ! -f .runner ]; then
-    configure_runner
-  fi
+echo ">> Iniciando GitHub Actions Runner: $RUNNER_NAME"
+gosu runner ./run.sh &
+RUNNER_PID=$!
+wait "$RUNNER_PID"
+code=$?
 
-  echo "Starting GitHub Actions Runner"
-  gosu runner ./run.sh &
-  RUNNER_PID=$!
-
-  wait "$RUNNER_PID"
-  EXIT_CODE=$?
-
-  if [ $EXIT_CODE -ne 0 ]; then
-    echo "Runner stopped with exit code $EXIT_CODE, restarting in 5 seconds"
-    sleep 5
-    rm -rf .runner .credentials
-  else
-    echo "Runner finished, restarting immediately for next job"
-  fi
-done
+# Saída inesperada (não foi sinal): desregistra para não deixar runner fantasma.
+# A orquestração reinicia o container (restart policy), que reconfigura.
+remove_runner
+exit "$code"

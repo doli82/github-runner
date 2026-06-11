@@ -131,7 +131,9 @@ parse_urls
 # Ephemeral sempre reconfigura (registro é descartado após cada job).
 if [ "$RUNNER_EPHEMERAL" = "true" ] || [ ! -f .runner ]; then
   rm -f .runner .credentials .credentials_rsaparams 2>/dev/null || true
-  configure_runner
+  # Se o registro falhar (API inacessível), espera antes de sair: sem isto o
+  # restart loop martela api.github.com e dispara abuse mitigation do GitHub.
+  configure_runner || { echo "ERROR: registro falhou; aguardando 60s antes de sair"; sleep 60; exit 1; }
 fi
 
 echo ">> Iniciando GitHub Actions Runner: $RUNNER_NAME"

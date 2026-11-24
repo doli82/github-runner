@@ -1,0 +1,5 @@
+# Regras ignoradas (já presentes no Dockerfile desde antes; o CI de PR nunca tinha rodado nele):
+ignore:
+  - DL3008   # apt sem versão fixa: queremos os patches de segurança mais recentes da base
+  - DL4006   # pipe sem pipefail em RUN
+  - SC1091   # `. /etc/os-release` não é seguido pelo shellcheck embutido

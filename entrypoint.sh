@@ -82,6 +82,13 @@ configure_runner() {
     "${extra[@]}"
 }
 
+# Remove todo estado local de registro; qualquer sobra faz o config.sh recusar
+# com "Cannot configure the runner because it is already configured".
+clean_runner_state() {
+  rm -f .runner .credentials .credentials_rsaparams \
+        .runner_migrated .credentials_migrated 2>/dev/null || true
+}
+
 remove_runner() {
   [ -f .runner ] || return 0
   local token
@@ -94,6 +101,7 @@ remove_runner() {
 # enquanto ele existir, há um job rodando e NÃO podemos sinalizar o listener
 # (TERM no Runner.Listener cancela o job no meio — era isso que matava os
 # deploys). Mesma estratégia do actions-runner-controller oficial.
+# shellcheck disable=SC2329 # invocada indiretamente por graceful_stop (trap)
 wait_for_job() {
   if pgrep -f Runner.Worker >/dev/null 2>&1; then
     echo ">> Job em andamento: aguardando finalizar antes de parar o runner..."
@@ -108,6 +116,7 @@ wait_for_job() {
 # Garanta na orquestração um timeout generoso ou o Docker mata em 10s:
 #   docker run --stop-timeout 3600   /   compose: stop_grace_period: 1h
 _stopped=0
+# shellcheck disable=SC2329 # invocada via trap
 graceful_stop() {
   [ "$_stopped" = "1" ] && return
   _stopped=1
@@ -130,10 +139,17 @@ parse_urls
 
 # Ephemeral sempre reconfigura (registro é descartado após cada job).
 if [ "$RUNNER_EPHEMERAL" = "true" ] || [ ! -f .runner ]; then
-  rm -f .runner .credentials .credentials_rsaparams 2>/dev/null || true
-  # Se o registro falhar (API inacessível), espera antes de sair: sem isto o
-  # restart loop martela api.github.com e dispara abuse mitigation do GitHub.
-  configure_runner || { echo "ERROR: registro falhou; aguardando 60s antes de sair"; sleep 60; exit 1; }
+  clean_runner_state
+  # Se o registro falhar, tenta uma vez desregistrar/limpar estado residual
+  # (ex.: "already configured") e registrar de novo. Se ainda falhar, espera
+  # antes de sair: sem isto o restart loop martela api.github.com e dispara
+  # abuse mitigation do GitHub.
+  if ! configure_runner; then
+    echo ">> Registro falhou; limpando estado residual e tentando novamente..."
+    remove_runner
+    clean_runner_state
+    configure_runner || { echo "ERROR: registro falhou; aguardando 60s antes de sair"; sleep 60; exit 1; }
+  fi
 fi
 
 echo ">> Iniciando GitHub Actions Runner: $RUNNER_NAME"

@@ -23,6 +23,7 @@ jobs:
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: Dockerfile
+          config: .hadolint.yaml
 
       - name: Lint entrypoint (shellcheck)
         uses: ludeeus/action-shellcheck@master

@@ -101,6 +101,7 @@ remove_runner() {
 # enquanto ele existir, há um job rodando e NÃO podemos sinalizar o listener
 # (TERM no Runner.Listener cancela o job no meio — era isso que matava os
 # deploys). Mesma estratégia do actions-runner-controller oficial.
+# shellcheck disable=SC2329 # invocada indiretamente por graceful_stop (trap)
 wait_for_job() {
   if pgrep -f Runner.Worker >/dev/null 2>&1; then
     echo ">> Job em andamento: aguardando finalizar antes de parar o runner..."
@@ -115,6 +116,7 @@ wait_for_job() {
 # Garanta na orquestração um timeout generoso ou o Docker mata em 10s:
 #   docker run --stop-timeout 3600   /   compose: stop_grace_period: 1h
 _stopped=0
+# shellcheck disable=SC2329 # invocada via trap
 graceful_stop() {
   [ "$_stopped" = "1" ] && return
   _stopped=1
